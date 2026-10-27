@@ -4,11 +4,7 @@ import multer from "multer";
 import { z } from "zod";
 import { AppError } from "../errors";
 import { assertOwnership, getAuthenticatedUid } from "../middleware/auth";
-import {
-  formatBytes,
-  validatePdfUpload,
-  type PdfExtractor,
-} from "../services/pdf";
+import { formatBytes, validatePdfUpload, type PdfExtractor } from "../services/pdf";
 import { buildStarterDocumentsForUser } from "../services/seed-docs";
 import type { StudyRepository } from "../services/repository";
 import type { StorageService } from "../services/storage";
@@ -59,10 +55,11 @@ export function createDocumentsRouter(deps: DocumentsRouterDeps): Router {
   router.get("/", async (req, res, next) => {
     try {
       const uid = getAuthenticatedUid(req);
-      const docs = await deps.repository.listDocumentsByUid(uid);
-      const summaries = docs
-        .filter((d) => d.uid === uid)
-        .map((d) => toDocumentSummary(d));
+      const summaries = deps.repository.listDocumentSummariesByUid
+        ? (await deps.repository.listDocumentSummariesByUid(uid)).filter((d) => d.uid === uid)
+        : (await deps.repository.listDocumentsByUid(uid))
+            .filter((d) => d.uid === uid)
+            .map((d) => toDocumentSummary(d));
       res.status(200).json({ documents: summaries });
     } catch (err) {
       next(err);
@@ -73,11 +70,13 @@ export function createDocumentsRouter(deps: DocumentsRouterDeps): Router {
   router.post("/seed", async (req, res, next) => {
     try {
       const uid = getAuthenticatedUid(req);
-      const existing = await deps.repository.listDocumentsByUid(uid);
+      const existing = deps.repository.listDocumentSummariesByUid
+        ? await deps.repository.listDocumentSummariesByUid(uid)
+        : (await deps.repository.listDocumentsByUid(uid)).map((d) => toDocumentSummary(d));
       if (existing.length > 0) {
         res.status(200).json({
           seeded: false,
-          documents: existing.map((d) => toDocumentSummary(d)),
+          documents: existing,
         });
         return;
       }

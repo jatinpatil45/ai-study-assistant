@@ -27,15 +27,12 @@ const firebaseConfig = {
   authDomain:
     (import.meta.env["VITE_FIREBASE_AUTH_DOMAIN"] as string | undefined) ??
     "ai-saas-jatin.firebaseapp.com",
-  projectId:
-    (import.meta.env["VITE_FIREBASE_PROJECT_ID"] as string | undefined) ??
-    "ai-saas-jatin",
+  projectId: (import.meta.env["VITE_FIREBASE_PROJECT_ID"] as string | undefined) ?? "ai-saas-jatin",
   storageBucket:
     (import.meta.env["VITE_FIREBASE_STORAGE_BUCKET"] as string | undefined) ??
     "ai-saas-jatin.firebasestorage.app",
   messagingSenderId:
-    (import.meta.env["VITE_FIREBASE_MESSAGING_SENDER_ID"] as string | undefined) ??
-    "306198381012",
+    (import.meta.env["VITE_FIREBASE_MESSAGING_SENDER_ID"] as string | undefined) ?? "306198381012",
   appId:
     (import.meta.env["VITE_FIREBASE_APP_ID"] as string | undefined) ??
     "1:306198381012:web:59b78fa482650453da5641",
@@ -43,6 +40,68 @@ const firebaseConfig = {
 
 let clientApp: FirebaseApp | undefined;
 let clientAuth: Auth | undefined;
+let inflightTokenPromise: Promise<string> | null = null;
+
+const AUTH_SNAPSHOT_KEY = "studymate:auth_snapshot";
+const STUDY_CACHE_PREFIX = "studymate:v1:";
+const PROFILE_SYNC_TTL_MS = 5 * 60 * 1000;
+
+interface CachedAuthSnapshot {
+  uid: string;
+  email: string;
+  displayName: string;
+  college: string;
+  branch: string;
+  syncedAt: number;
+}
+
+function readAuthSnapshot(): CachedAuthSnapshot | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(AUTH_SNAPSHOT_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<CachedAuthSnapshot>;
+    if (!parsed || typeof parsed.uid !== "string" || !parsed.uid) return null;
+    return {
+      uid: parsed.uid,
+      email: typeof parsed.email === "string" ? parsed.email : "",
+      displayName: typeof parsed.displayName === "string" ? parsed.displayName : "Student",
+      college: typeof parsed.college === "string" ? parsed.college : "",
+      branch: typeof parsed.branch === "string" ? parsed.branch : "",
+      syncedAt: typeof parsed.syncedAt === "number" ? parsed.syncedAt : 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeAuthSnapshot(snapshot: CachedAuthSnapshot): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(AUTH_SNAPSHOT_KEY, JSON.stringify(snapshot));
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
+export function clearPersistedStudySession(): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(AUTH_SNAPSHOT_KEY);
+    const keysToRemove: string[] = [];
+    for (let i = 0; i < window.localStorage.length; i += 1) {
+      const key = window.localStorage.key(i);
+      if (key && key.startsWith(STUDY_CACHE_PREFIX)) {
+        keysToRemove.push(key);
+      }
+    }
+    for (const key of keysToRemove) {
+      window.localStorage.removeItem(key);
+    }
+  } catch {
+    // ignore storage errors
+  }
+}
 
 export function getFirebaseClientAuth(): Auth | null {
   if (typeof window === "undefined") return null;
@@ -66,23 +125,39 @@ export async function getValidIdToken(): Promise<string> {
     return await auth.currentUser.getIdToken();
   }
 
-  const restoredUser = await new Promise<User | null>((resolve) => {
-    const timeout = setTimeout(() => {
-      unsubscribe();
-      resolve(auth.currentUser);
-    }, 800);
-    const unsubscribe = onAuthStateChanged(auth, (u) => {
-      clearTimeout(timeout);
-      unsubscribe();
-      resolve(u);
-    });
-  });
-
-  if (restoredUser) {
-    return await restoredUser.getIdToken();
+  if (inflightTokenPromise) {
+    return await inflightTokenPromise;
   }
 
-  throw new Error("Please sign in to continue.");
+  inflightTokenPromise = (async () => {
+    try {
+      if (typeof auth.authStateReady === "function") {
+        await auth.authStateReady();
+      } else {
+        await new Promise<User | null>((resolve) => {
+          const timeout = setTimeout(() => {
+            unsubscribe();
+            resolve(auth.currentUser);
+          }, 800);
+          const unsubscribe = onAuthStateChanged(auth, (u) => {
+            clearTimeout(timeout);
+            unsubscribe();
+            resolve(u);
+          });
+        });
+      }
+
+      if (auth.currentUser) {
+        return await auth.currentUser.getIdToken();
+      }
+
+      throw new Error("Please sign in to continue.");
+    } finally {
+      inflightTokenPromise = null;
+    }
+  })();
+
+  return await inflightTokenPromise;
 }
 
 export async function apiRequest<T>(
@@ -122,8 +197,7 @@ export async function apiRequest<T>(
   };
 
   if (!res.ok) {
-    const msg =
-      data?.error?.message ?? `Request failed with status ${res.status}`;
+    const msg = data?.error?.message ?? `Request failed with status ${res.status}`;
     throw new Error(msg);
   }
 
@@ -176,10 +250,47 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return;
     }
 
+    // Hydrate returning signed-in user immediately on new tab open without waiting
+    // 300-700ms for Firebase IndexedDB initialization.
+    const cached = readAuthSnapshot();
+    if (cached?.uid) {
+      setUser(
+        (prev) =>
+          prev ??
+          ({
+            uid: cached.uid,
+            email: cached.email,
+            displayName: cached.displayName,
+            isAnonymous: false,
+          } as User),
+      );
+      setStudentMeta({
+        college: cached.college,
+        branch: cached.branch,
+      });
+      setLoading(false);
+    }
+
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       if (firebaseUser && !firebaseUser.isAnonymous) {
         setUser(firebaseUser);
         setLoading(false);
+
+        const defaultDisplayName =
+          firebaseUser.displayName || firebaseUser.email?.split("@")[0] || "Student";
+        const latestCached = readAuthSnapshot();
+        const isSameFreshUser =
+          latestCached?.uid === firebaseUser.uid &&
+          Date.now() - latestCached.syncedAt < PROFILE_SYNC_TTL_MS;
+
+        if (isSameFreshUser && latestCached) {
+          setStudentMeta({
+            college: latestCached.college,
+            branch: latestCached.branch,
+          });
+          return;
+        }
+
         try {
           const res = await apiRequest<{
             profile: {
@@ -190,22 +301,35 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             } | null;
           }>("/api/profile");
           if (res.profile) {
-            setStudentMeta({
-              college: res.profile.college ?? "",
-              branch: res.profile.branch ?? "",
+            const college = res.profile.college ?? "";
+            const branch = res.profile.branch ?? "";
+            setStudentMeta({ college, branch });
+            writeAuthSnapshot({
+              uid: firebaseUser.uid,
+              email: firebaseUser.email || res.profile.email || "",
+              displayName:
+                firebaseUser.displayName || res.profile.displayName || defaultDisplayName,
+              college,
+              branch,
+              syncedAt: Date.now(),
             });
           } else {
             await apiRequest("/api/profile", {
               method: "POST",
               body: {
-                displayName:
-                  firebaseUser.displayName ||
-                  firebaseUser.email?.split("@")[0] ||
-                  "Student",
+                displayName: defaultDisplayName,
                 email: firebaseUser.email || "",
                 college: "",
                 branch: "",
               },
+            });
+            writeAuthSnapshot({
+              uid: firebaseUser.uid,
+              email: firebaseUser.email || "",
+              displayName: defaultDisplayName,
+              college: "",
+              branch: "",
+              syncedAt: Date.now(),
             });
           }
         } catch {
@@ -215,6 +339,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (firebaseUser?.isAnonymous) {
           await signOut(auth).catch(() => undefined);
         }
+        clearPersistedStudySession();
         setUser(null);
         setStudentMeta(DEFAULT_META);
         setLoading(false);
@@ -228,15 +353,37 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const auth = getFirebaseClientAuth();
     if (!auth) throw new Error("Auth unavailable");
     const cred = await signInWithEmailAndPassword(auth, email.trim(), password);
+    const cleanName = cred.user.displayName || cred.user.email?.split("@")[0] || "Student";
+    const cleanEmail = cred.user.email || email.trim();
     setUser(cred.user);
+    writeAuthSnapshot({
+      uid: cred.user.uid,
+      email: cleanEmail,
+      displayName: cleanName,
+      college: "",
+      branch: "",
+      syncedAt: 0, // allow background profile fetch to hydrate college/branch
+    });
     try {
-      await apiRequest("/api/profile", {
+      const res = await apiRequest<{
+        profile?: { college?: string; branch?: string };
+      }>("/api/profile", {
         method: "POST",
         body: {
-          displayName:
-            cred.user.displayName || cred.user.email?.split("@")[0] || "Student",
-          email: cred.user.email || email.trim(),
+          displayName: cleanName,
+          email: cleanEmail,
         },
+      });
+      const college = res.profile?.college ?? "";
+      const branch = res.profile?.branch ?? "";
+      setStudentMeta({ college, branch });
+      writeAuthSnapshot({
+        uid: cred.user.uid,
+        email: cleanEmail,
+        displayName: cleanName,
+        college,
+        branch,
+        syncedAt: Date.now(),
       });
     } catch {
       // ignore
@@ -251,13 +398,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (cleanName) {
       await updateProfile(cred.user, { displayName: cleanName });
     }
+    const finalName = cleanName || email.trim().split("@")[0] || "Student";
     setUser(cred.user);
     setProfileTick((t) => t + 1);
+    writeAuthSnapshot({
+      uid: cred.user.uid,
+      email: email.trim(),
+      displayName: finalName,
+      college: "",
+      branch: "",
+      syncedAt: Date.now(),
+    });
     try {
       await apiRequest("/api/profile", {
         method: "POST",
         body: {
-          displayName: cleanName || email.trim().split("@")[0] || "Student",
+          displayName: finalName,
           email: email.trim(),
           college: "",
           branch: "",
@@ -276,6 +432,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const signOutUser = useCallback(async () => {
     const auth = getFirebaseClientAuth();
+    clearPersistedStudySession();
     if (!auth) return;
     await signOut(auth);
     setUser(null);
@@ -297,12 +454,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         branch: updates.branch !== undefined ? updates.branch.trim() : studentMeta.branch,
       };
       setStudentMeta(nextMeta);
+      const activeUser = auth?.currentUser;
+      const finalName = nextName?.trim() || activeUser?.displayName || "Student";
+      const finalEmail = activeUser?.email || "";
+      if (activeUser?.uid) {
+        writeAuthSnapshot({
+          uid: activeUser.uid,
+          email: finalEmail,
+          displayName: finalName,
+          college: nextMeta.college,
+          branch: nextMeta.branch,
+          syncedAt: Date.now(),
+        });
+      }
       try {
         await apiRequest("/api/profile", {
           method: "POST",
           body: {
-            displayName: nextName?.trim() || auth?.currentUser?.displayName || "Student",
-            email: auth?.currentUser?.email || "",
+            displayName: finalName,
+            email: finalEmail,
             college: nextMeta.college,
             branch: nextMeta.branch,
           },
@@ -319,7 +489,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const isAnonymous = false;
     const displayName =
       user?.displayName?.trim() ||
-      (user?.email ? user.email.split("@")[0] ?? "Student" : "Student");
+      (user?.email ? (user.email.split("@")[0] ?? "Student") : "Student");
     const email = user?.email || "";
     const initials =
       displayName

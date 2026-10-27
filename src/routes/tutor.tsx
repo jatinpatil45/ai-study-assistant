@@ -1,22 +1,48 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Plus, Send, Sparkles, BookOpen, FileText, Paperclip, MessageSquareText } from "lucide-react";
+import {
+  Plus,
+  Send,
+  Sparkles,
+  BookOpen,
+  FileText,
+  Paperclip,
+  MessageSquareText,
+} from "lucide-react";
 import { AppShell, EmptyState } from "@/components/app-shell";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Sheet, SheetContent, SheetTrigger, SheetTitle } from "@/components/ui/sheet";
 import { apiRequest, useAuth } from "@/lib/firebase-client";
-import { fetchHistoryList, formatAiText, formatRelativeTime, useStudyDocuments, type ApiHistoryItem } from "@/lib/study-api";
+import {
+  formatAiText,
+  formatRelativeTime,
+  useStudyDocuments,
+  useStudyHistory,
+  type ApiHistoryItem,
+} from "@/lib/study-api";
 
 export const Route = createFileRoute("/tutor")({
   head: () => ({
     meta: [
       { title: "AI Tutor — StudyMate AI" },
-      { name: "description", content: "Chat with an AI tutor about your uploaded study documents." },
+      {
+        name: "description",
+        content: "Chat with an AI tutor about your uploaded study documents.",
+      },
       { property: "og:title", content: "AI Tutor — StudyMate AI" },
-      { property: "og:description", content: "Ask questions and get explanations with page references." },
+      {
+        property: "og:description",
+        content: "Ask questions and get explanations with page references.",
+      },
     ],
   }),
   component: Tutor,
@@ -110,9 +136,12 @@ function ConversationList({
   return (
     <div className="flex h-full flex-col">
       <Button className="m-3" onClick={onNewChat}>
-        <Plus className="mr-1.5 h-4 w-4" />New chat
+        <Plus className="mr-1.5 h-4 w-4" />
+        New chat
       </Button>
-      <p className="px-4 pb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Recent</p>
+      <p className="px-4 pb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+        Recent
+      </p>
       <ul className="flex-1 space-y-1 overflow-y-auto px-2">
         {items.length === 0 ? (
           <li className="px-3 py-4 text-xs text-muted-foreground">
@@ -128,7 +157,9 @@ function ConversationList({
                   onClick={() => onSelect(c)}
                   className={`w-full rounded-lg px-3 py-2 text-left ${isActive ? "bg-primary-soft" : "hover:bg-muted"}`}
                 >
-                  <p className={`truncate text-sm font-medium ${isActive ? "text-primary" : ""}`}>{c.title}</p>
+                  <p className={`truncate text-sm font-medium ${isActive ? "text-primary" : ""}`}>
+                    {c.title}
+                  </p>
                   <p className="truncate text-xs text-muted-foreground">
                     {formatRelativeTime(c.createdAt)} · {c.documentTitle}
                   </p>
@@ -145,11 +176,11 @@ function ConversationList({
 function Tutor() {
   const { user } = useAuth();
   const { docs } = useStudyDocuments();
+  const { items: chatHistory, prependHistoryItem } = useStudyHistory("chat");
   const readyDocs = docs.filter((d) => d.status === "ready");
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
   const [ctx, setCtx] = useState<string>("");
-  const [chatHistory, setChatHistory] = useState<ApiHistoryItem[]>([]);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const navigate = useNavigate();
@@ -160,21 +191,10 @@ function Tutor() {
     }
   }, [ctx, readyDocs]);
 
-  const loadHistory = async () => {
-    if (!user) return;
-    try {
-      const list = await fetchHistoryList("chat");
-      setChatHistory(list);
-    } catch {
-      setChatHistory([]);
-    }
-  };
+  const targetDocId = ctx && ctx !== "all" ? ctx : (readyDocs[0]?.id ?? "");
 
-  useEffect(() => {
-    void loadHistory();
-  }, [user]);
-
-  const targetDocId = ctx && ctx !== "all" ? ctx : readyDocs[0]?.id ?? "";
+  const selectedDocTitle =
+    readyDocs.find((d) => d.id === ctx)?.title ?? readyDocs[0]?.title ?? "No document uploaded";
 
   const send = async (text: string) => {
     const trimmed = text.trim();
@@ -192,16 +212,23 @@ function Tutor() {
         text: m.text,
       }));
 
-    setMessages((m) => [...m, { role: "user", text: trimmed }, { role: "ai", text: "", pending: true }]);
+    setMessages((m) => [
+      ...m,
+      { role: "user", text: trimmed },
+      { role: "ai", text: "", pending: true },
+    ]);
     setInput("");
     setSending(true);
 
     try {
       const res = await apiRequest<{
         id: string;
+        documentId?: string;
+        documentTitle?: string;
         answer: string;
         sources: string[];
         supported: boolean;
+        createdAt?: string;
       }>("/api/ai/chat", {
         method: "POST",
         body: {
@@ -222,7 +249,21 @@ function Tutor() {
         },
       ]);
       setActiveChatId(res.id);
-      void loadHistory();
+      prependHistoryItem({
+        id: res.id,
+        uid: user?.uid ?? "",
+        type: "chat",
+        title: trimmed.slice(0, 120),
+        documentId: res.documentId ?? targetDocId,
+        documentTitle: res.documentTitle ?? selectedDocTitle,
+        payload: {
+          question: trimmed,
+          answer: res.answer,
+          supported: res.supported,
+          sources: sourceLabels,
+        },
+        createdAt: res.createdAt ?? new Date().toISOString(),
+      });
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Could not get an answer from the AI tutor.";
       toast.error("AI Tutor error", { description: msg });
@@ -241,9 +282,29 @@ function Tutor() {
   const handleSelectHistory = async (item: ApiHistoryItem) => {
     setActiveChatId(item.id);
     if (item.documentId) setCtx(item.documentId);
+
+    const localPayload = item.payload ?? {};
+    const localQuestion =
+      typeof localPayload["question"] === "string" ? localPayload["question"] : item.title;
+    const localAnswer = typeof localPayload["answer"] === "string" ? localPayload["answer"] : "";
+    const localRawSources = Array.isArray(localPayload["sources"]) ? localPayload["sources"] : [];
+    const localLabels = localRawSources.filter((s): s is string => typeof s === "string");
+
+    if (localQuestion && localAnswer) {
+      setMessages([
+        { role: "user", text: localQuestion },
+        {
+          role: "ai",
+          text: localAnswer,
+          ...(localLabels.length > 0 ? { sources: localLabels } : {}),
+        },
+      ]);
+      return;
+    }
+
     try {
       const res = await apiRequest<{ item?: ApiHistoryItem }>(`/api/history/${item.id}`);
-      const p = res.item?.payload ?? item.payload ?? {};
+      const p = res.item?.payload ?? localPayload;
       const question = typeof p["question"] === "string" ? p["question"] : item.title;
       const answer = typeof p["answer"] === "string" ? p["answer"] : "";
       const rawSources = Array.isArray(p["sources"]) ? p["sources"] : [];
@@ -263,9 +324,6 @@ function Tutor() {
     setActiveChatId(null);
     setMessages([]);
   };
-
-  const selectedDocTitle =
-    readyDocs.find((d) => d.id === ctx)?.title ?? readyDocs[0]?.title ?? "No document uploaded";
 
   return (
     <AppShell
@@ -326,7 +384,11 @@ function Tutor() {
               <div className="flex h-full items-center justify-center">
                 <EmptyState
                   icon={MessageSquareText}
-                  title={readyDocs.length === 0 ? "Upload a PDF to start chatting" : "Ask your AI Tutor anything"}
+                  title={
+                    readyDocs.length === 0
+                      ? "Upload a PDF to start chatting"
+                      : "Ask your AI Tutor anything"
+                  }
                   description={
                     readyDocs.length === 0
                       ? "Upload your textbook or lecture notes in My Library, then ask questions here to get grounded answers with page citations."
@@ -437,11 +499,20 @@ function Tutor() {
                   }
                 }}
                 rows={1}
-                placeholder={readyDocs.length > 0 ? "Ask about your document…" : "Upload a PDF in My Library first…"}
+                placeholder={
+                  readyDocs.length > 0
+                    ? "Ask about your document…"
+                    : "Upload a PDF in My Library first…"
+                }
                 disabled={readyDocs.length === 0}
                 className="min-h-9 resize-none border-0 bg-transparent shadow-none focus-visible:ring-0"
               />
-              <Button type="submit" size="icon" aria-label="Send" disabled={!input.trim() || sending || readyDocs.length === 0}>
+              <Button
+                type="submit"
+                size="icon"
+                aria-label="Send"
+                disabled={!input.trim() || sending || readyDocs.length === 0}
+              >
                 <Send className="h-4 w-4" />
               </Button>
             </form>

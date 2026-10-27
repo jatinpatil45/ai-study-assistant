@@ -5,16 +5,26 @@ import { Copy, Download, NotebookPen, Sparkles, AlertTriangle } from "lucide-rea
 import { AppShell, DemoNote, EmptyState, SectionCard } from "@/components/app-shell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { apiRequest } from "@/lib/firebase-client";
-import { useStudyDocuments } from "@/lib/study-api";
+import { apiRequest, useAuth } from "@/lib/firebase-client";
+import { useStudyDocuments, useStudyHistory } from "@/lib/study-api";
 
 export const Route = createFileRoute("/notes")({
   head: () => ({
     meta: [
       { title: "AI Notes — StudyMate AI" },
-      { name: "description", content: "Generate summaries, chapter notes, definitions and revision sheets from your PDFs." },
+      {
+        name: "description",
+        content:
+          "Generate summaries, chapter notes, definitions and revision sheets from your PDFs.",
+      },
       { property: "og:title", content: "AI Notes — StudyMate AI" },
       { property: "og:description", content: "Turn textbooks into revision-ready notes." },
     ],
@@ -63,7 +73,9 @@ const sample: NoteOutput = {
 };
 
 function Notes() {
+  const { user } = useAuth();
   const { docs } = useStudyDocuments();
+  const { prependHistoryItem } = useStudyHistory();
   const [doc, setDoc] = useState("");
   const [type, setType] = useState<(typeof types)[number]["id"]>("summary");
   const [topic, setTopic] = useState("");
@@ -97,10 +109,12 @@ function Notes() {
       if (type === "simple") {
         const targetTopic = topic.trim() || selectedDoc.title;
         const res = await apiRequest<{
+          id?: string;
           topic: string;
           explanation: string;
           keyTakeaways: string[];
           sources: string[];
+          createdAt?: string;
         }>("/api/ai/explain", {
           method: "POST",
           body: {
@@ -117,12 +131,32 @@ function Notes() {
           ],
           sourceRange: res.sources.length > 0 ? res.sources.join(" · ") : selectedDoc.title,
         });
+        if (res.id) {
+          prependHistoryItem({
+            id: res.id,
+            uid: user?.uid ?? "",
+            type: "explanation",
+            title: `Explanation: ${res.topic.slice(0, 100)}`,
+            documentId: selectedDoc.id,
+            documentTitle: selectedDoc.title,
+            payload: {
+              topic: res.topic,
+              level: "beginner",
+              explanation: res.explanation,
+              keyTakeaways: res.keyTakeaways,
+              sources: res.sources,
+            },
+            createdAt: res.createdAt ?? new Date().toISOString(),
+          });
+        }
       } else {
         const res = await apiRequest<{
+          id?: string;
           title: string;
           summary: string;
           sections: { heading: string; bullets: string[] }[];
           sources: string[];
+          createdAt?: string;
         }>("/api/ai/summarize", {
           method: "POST",
           body: {
@@ -132,12 +166,26 @@ function Notes() {
         });
         setNote({
           title: res.title,
-          sections: [
-            { heading: "Executive Summary", bullets: [res.summary] },
-            ...res.sections,
-          ],
+          sections: [{ heading: "Executive Summary", bullets: [res.summary] }, ...res.sections],
           sourceRange: res.sources.length > 0 ? res.sources.join(" · ") : selectedDoc.title,
         });
+        if (res.id) {
+          prependHistoryItem({
+            id: res.id,
+            uid: user?.uid ?? "",
+            type: "note",
+            title: res.title,
+            documentId: selectedDoc.id,
+            documentTitle: selectedDoc.title,
+            payload: {
+              style: type,
+              summary: res.summary,
+              sections: res.sections,
+              sources: res.sources,
+            },
+            createdAt: res.createdAt ?? new Date().toISOString(),
+          });
+        }
       }
       setState("done");
       toast.success("Notes generated & saved to Study History");
@@ -211,7 +259,9 @@ function Notes() {
                   type === t.id ? "border-primary bg-primary-soft" : "hover:bg-muted"
                 }`}
               >
-                <p className={`text-sm font-medium ${type === t.id ? "text-primary" : ""}`}>{t.label}</p>
+                <p className={`text-sm font-medium ${type === t.id ? "text-primary" : ""}`}>
+                  {t.label}
+                </p>
                 <p className="text-xs text-muted-foreground">{t.desc}</p>
               </button>
             ))}
@@ -229,7 +279,11 @@ function Notes() {
               />
             </div>
           )}
-          <Button className="mt-4 w-full" onClick={() => void generate()} disabled={state === "loading"}>
+          <Button
+            className="mt-4 w-full"
+            onClick={() => void generate()}
+            disabled={state === "loading"}
+          >
             <Sparkles className="mr-1.5 h-4 w-4" />
             {state === "loading" ? "Generating with Gemini…" : "Generate notes"}
           </Button>
@@ -280,10 +334,20 @@ function Notes() {
               description={`${types.find((t) => t.id === type)?.label ?? "Notes"}`}
               action={
                 <div className="flex gap-1">
-                  <Button variant="ghost" size="icon" aria-label="Copy notes" onClick={() => void handleCopy()}>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    aria-label="Copy notes"
+                    onClick={() => void handleCopy()}
+                  >
                     <Copy className="h-4 w-4" />
                   </Button>
-                  <Button variant="ghost" size="icon" aria-label="Download notes" onClick={handleDownload}>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    aria-label="Download notes"
+                    onClick={handleDownload}
+                  >
                     <Download className="h-4 w-4" />
                   </Button>
                 </div>
@@ -303,7 +367,9 @@ function Notes() {
                     </ul>
                   </div>
                 ))}
-                <p className="border-t pt-3 text-xs text-muted-foreground">Source: {note.sourceRange}</p>
+                <p className="border-t pt-3 text-xs text-muted-foreground">
+                  Source: {note.sourceRange}
+                </p>
               </div>
             </SectionCard>
           )}

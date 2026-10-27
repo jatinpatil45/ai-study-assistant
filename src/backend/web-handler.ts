@@ -3,29 +3,12 @@ import { z, ZodError } from "zod";
 import { getEnv } from "./config/env";
 import { detectFirebaseConfigStatus } from "./config/firebase";
 import { AppError } from "./errors";
-import {
-  assertOwnership,
-  FirebaseAdminTokenVerifier,
-  type TokenVerifier,
-} from "./middleware/auth";
-import {
-  GoogleGenAiClient,
-  StudyAiService,
-} from "./services/ai";
-import {
-  DefaultPdfExtractor,
-  formatBytes,
-  validatePdfUpload,
-} from "./services/pdf";
+import { assertOwnership, FirebaseAdminTokenVerifier, type TokenVerifier } from "./middleware/auth";
+import { GoogleGenAiClient, StudyAiService } from "./services/ai";
+import { DefaultPdfExtractor, formatBytes, validatePdfUpload } from "./services/pdf";
 import { buildStarterDocumentsForUser } from "./services/seed-docs";
-import {
-  FirestoreStudyRepository,
-  type StudyRepository,
-} from "./services/repository";
-import {
-  FirebaseStorageService,
-  type StorageService,
-} from "./services/storage";
+import { FirestoreStudyRepository, type StudyRepository } from "./services/repository";
+import { FirebaseStorageService, type StorageService } from "./services/storage";
 import type {
   ClientQuizQuestion,
   DocumentRecord,
@@ -55,10 +38,7 @@ const ChatRequestSchema = z.object({
 
 const SummarizeRequestSchema = z.object({
   documentId: z.string().trim().min(1, "documentId is required"),
-  style: z
-    .enum(["summary", "chapter", "definitions", "revision"])
-    .optional()
-    .default("summary"),
+  style: z.enum(["summary", "chapter", "definitions", "revision"]).optional().default("summary"),
   pageRange: z
     .object({
       start: z.number().int().min(1),
@@ -88,9 +68,7 @@ const QuizGradeRequestSchema = z.object({
 });
 
 const HistoryQuerySchema = z.object({
-  type: z
-    .enum(["chat", "note", "explanation", "quiz_attempt", "document"])
-    .optional(),
+  type: z.enum(["chat", "note", "explanation", "quiz_attempt", "document"]).optional(),
   limit: z.coerce.number().int().min(1).max(100).optional().default(50),
 });
 
@@ -172,9 +150,7 @@ function filterPagesByRange(
   range?: { start: number; end: number },
 ): PdfPageContent[] {
   if (!range) return pages;
-  const filtered = pages.filter(
-    (p) => p.pageNumber >= range.start && p.pageNumber <= range.end,
-  );
+  const filtered = pages.filter((p) => p.pageNumber >= range.start && p.pageNumber <= range.end);
   if (filtered.length === 0) {
     throw new AppError(
       400,
@@ -183,6 +159,29 @@ function filterPagesByRange(
     );
   }
   return filtered;
+}
+
+let cachedServices:
+  | {
+      verifier: TokenVerifier;
+      repository: StudyRepository;
+      storage: StorageService;
+      pdfExtractor: DefaultPdfExtractor;
+      aiService: StudyAiService;
+    }
+  | undefined;
+
+function getWebServices(env: ReturnType<typeof getEnv>) {
+  if (!cachedServices) {
+    cachedServices = {
+      verifier: new FirebaseAdminTokenVerifier(env),
+      repository: new FirestoreStudyRepository(env),
+      storage: new FirebaseStorageService(env),
+      pdfExtractor: new DefaultPdfExtractor(),
+      aiService: new StudyAiService(new GoogleGenAiClient(env)),
+    };
+  }
+  return cachedServices;
 }
 
 export async function handleWebApiRequest(request: Request): Promise<Response> {
@@ -224,11 +223,7 @@ export async function handleWebApiRequest(request: Request): Promise<Response> {
       });
     }
 
-    const verifier: TokenVerifier = new FirebaseAdminTokenVerifier(env);
-    const repository: StudyRepository = new FirestoreStudyRepository(env);
-    const storage: StorageService = new FirebaseStorageService(env);
-    const pdfExtractor = new DefaultPdfExtractor();
-    const aiService = new StudyAiService(new GoogleGenAiClient(env));
+    const { verifier, repository, storage, pdfExtractor, aiService } = getWebServices(env);
 
     const uid = await verifyRequestUid(request, verifier);
 
@@ -246,19 +241,17 @@ export async function handleWebApiRequest(request: Request): Promise<Response> {
       const displayName =
         typeof rawBody["displayName"] === "string" && rawBody["displayName"].trim()
           ? rawBody["displayName"].trim()
-          : existing?.displayName ?? "Student";
+          : (existing?.displayName ?? "Student");
       const email =
         typeof rawBody["email"] === "string" && rawBody["email"].trim()
           ? rawBody["email"].trim()
-          : existing?.email ?? "";
+          : (existing?.email ?? "");
       const college =
         typeof rawBody["college"] === "string"
           ? rawBody["college"].trim()
-          : existing?.college ?? "";
+          : (existing?.college ?? "");
       const branch =
-        typeof rawBody["branch"] === "string"
-          ? rawBody["branch"].trim()
-          : existing?.branch ?? "";
+        typeof rawBody["branch"] === "string" ? rawBody["branch"].trim() : (existing?.branch ?? "");
 
       const record = {
         uid,
@@ -277,19 +270,25 @@ export async function handleWebApiRequest(request: Request): Promise<Response> {
 
     // GET /api/documents
     if (pathname === "/api/documents" && method === "GET") {
-      const docs = await repository.listDocumentsByUid(uid);
+      const summaries = repository.listDocumentSummariesByUid
+        ? (await repository.listDocumentSummariesByUid(uid)).filter((d) => d.uid === uid)
+        : (await repository.listDocumentsByUid(uid))
+            .filter((d) => d.uid === uid)
+            .map((d) => toDocumentSummary(d));
       return jsonResponse(200, {
-        documents: docs.filter((d) => d.uid === uid).map((d) => toDocumentSummary(d)),
+        documents: summaries,
       });
     }
 
     // POST /api/documents/seed
     if (pathname === "/api/documents/seed" && method === "POST") {
-      const existing = await repository.listDocumentsByUid(uid);
+      const existing = repository.listDocumentSummariesByUid
+        ? await repository.listDocumentSummariesByUid(uid)
+        : (await repository.listDocumentsByUid(uid)).map((d) => toDocumentSummary(d));
       if (existing.length > 0) {
         return jsonResponse(200, {
           seeded: false,
-          documents: existing.map((d) => toDocumentSummary(d)),
+          documents: existing,
         });
       }
       const starterDocs = buildStarterDocumentsForUser(uid);

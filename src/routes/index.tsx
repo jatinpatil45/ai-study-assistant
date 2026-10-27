@@ -1,18 +1,41 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
-import { Line, LineChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { FileText, MessageSquareText, NotebookPen, ListChecks, Search, Upload, ArrowRight, FolderOpen, Target } from "lucide-react";
+import { useState } from "react";
+import {
+  Line,
+  LineChart,
+  CartesianGrid,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
+import {
+  FileText,
+  MessageSquareText,
+  NotebookPen,
+  ListChecks,
+  Search,
+  Upload,
+  ArrowRight,
+  FolderOpen,
+  Target,
+} from "lucide-react";
 import { AppShell, EmptyState, SectionCard, StatusBadge } from "@/components/app-shell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Skeleton } from "@/components/ui/skeleton";
 import { useAuth } from "@/lib/firebase-client";
-import { fetchHistoryList, formatRelativeTime, useStudyDocuments, type ApiHistoryItem } from "@/lib/study-api";
+import { formatRelativeTime, useStudyDocuments, useStudyHistory } from "@/lib/study-api";
 
 export const Route = createFileRoute("/")({
   head: () => ({
     meta: [
       { title: "Dashboard — StudyMate AI" },
-      { name: "description", content: "Your study overview: recent documents, AI conversations, activity and quiz performance." },
+      {
+        name: "description",
+        content:
+          "Your study overview: recent documents, AI conversations, activity and quiz performance.",
+      },
       { property: "og:title", content: "Dashboard — StudyMate AI" },
       { property: "og:description", content: "Your personal AI study assistant dashboard." },
     ],
@@ -21,29 +44,22 @@ export const Route = createFileRoute("/")({
 });
 
 const quick = [
-  { title: "Ask AI Tutor", desc: "Get explanations from your PDFs", icon: MessageSquareText, to: "/tutor" },
+  {
+    title: "Ask AI Tutor",
+    desc: "Get explanations from your PDFs",
+    icon: MessageSquareText,
+    to: "/tutor",
+  },
   { title: "Generate Notes", desc: "Summaries & revision sheets", icon: NotebookPen, to: "/notes" },
   { title: "Practice Quiz", desc: "Test yourself with MCQs", icon: ListChecks, to: "/quiz" },
   { title: "Upload PDF", desc: "Add notes or textbooks", icon: Upload, to: "/library" },
 ] as const;
 
 function Dashboard() {
-  const { user, displayName } = useAuth();
-  const { docs } = useStudyDocuments();
+  const { displayName } = useAuth();
+  const { docs, loading: docsLoading } = useStudyDocuments();
+  const { items: historyItems, loading: historyLoading } = useStudyHistory();
   const [search, setSearch] = useState("");
-  const [historyItems, setHistoryItems] = useState<ApiHistoryItem[]>([]);
-
-  useEffect(() => {
-    if (!user) return;
-    void (async () => {
-      try {
-        const list = await fetchHistoryList();
-        setHistoryItems(list);
-      } catch {
-        setHistoryItems([]);
-      }
-    })();
-  }, [user]);
 
   const firstName = displayName.split(" ")[0] || "Student";
   const filteredDocs = search.trim()
@@ -60,18 +76,17 @@ function Dashboard() {
     quizAttempts.length > 0
       ? `${Math.round(
           quizAttempts.reduce(
-            (acc, a) => acc + (a.percent ?? (a.total ? Math.round(((a.score ?? 0) / a.total) * 100) : 0)),
+            (acc, a) =>
+              acc + (a.percent ?? (a.total ? Math.round(((a.score ?? 0) / a.total) * 100) : 0)),
             0,
           ) / quizAttempts.length,
         )}%`
       : "—";
 
-  const quizChartData = [...quizAttempts]
-    .reverse()
-    .map((a, idx) => ({
-      attempt: `Q${idx + 1}`,
-      score: a.percent ?? (a.total ? Math.round(((a.score ?? 0) / a.total) * 100) : 0),
-    }));
+  const quizChartData = [...quizAttempts].reverse().map((a, idx) => ({
+    attempt: `Q${idx + 1}`,
+    score: a.percent ?? (a.total ? Math.round(((a.score ?? 0) / a.total) * 100) : 0),
+  }));
 
   return (
     <AppShell
@@ -79,7 +94,8 @@ function Dashboard() {
       actions={
         <Button asChild size="sm" className="hidden sm:inline-flex">
           <Link to="/library">
-            <Upload className="mr-1.5 h-4 w-4" />Upload document
+            <Upload className="mr-1.5 h-4 w-4" />
+            Upload document
           </Link>
         </Button>
       }
@@ -124,10 +140,17 @@ function Dashboard() {
       <div className="mt-4 grid grid-cols-3 gap-3">
         {[
           { i: FileText, l: "Uploaded PDFs", v: String(docs.length) },
-          { i: MessageSquareText, l: "AI Tutor chats", v: String(historyItems.filter((i) => i.type === "chat").length) },
+          {
+            i: MessageSquareText,
+            l: "AI Tutor chats",
+            v: String(historyItems.filter((i) => i.type === "chat").length),
+          },
           { i: Target, l: "Avg. quiz score", v: avgQuizScore },
         ].map((s) => (
-          <div key={s.l} className="flex items-center gap-3 rounded-xl border bg-card p-4 shadow-card">
+          <div
+            key={s.l}
+            className="flex items-center gap-3 rounded-xl border bg-card p-4 shadow-card"
+          >
             <s.i className="hidden h-5 w-5 text-primary sm:block" />
             <div>
               <p className="font-display text-xl font-bold">{s.v}</p>
@@ -144,12 +167,25 @@ function Dashboard() {
           action={
             <Button asChild variant="ghost" size="sm">
               <Link to="/library">
-                View all<ArrowRight className="ml-1 h-3.5 w-3.5" />
+                View all
+                <ArrowRight className="ml-1 h-3.5 w-3.5" />
               </Link>
             </Button>
           }
         >
-          {filteredDocs.length === 0 ? (
+          {docsLoading ? (
+            <div className="space-y-3 py-2">
+              {Array.from({ length: 3 }).map((_, i) => (
+                <div key={i} className="flex items-center gap-3">
+                  <Skeleton className="h-9 w-9 rounded-lg" />
+                  <div className="flex-1 space-y-1.5">
+                    <Skeleton className="h-4 w-2/3" />
+                    <Skeleton className="h-3 w-1/3" />
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : filteredDocs.length === 0 ? (
             <EmptyState
               icon={FolderOpen}
               title="No documents uploaded yet"
@@ -187,7 +223,16 @@ function Dashboard() {
             </Button>
           }
         >
-          {recentChats.length === 0 ? (
+          {historyLoading ? (
+            <div className="space-y-3 py-2">
+              {Array.from({ length: 3 }).map((_, i) => (
+                <div key={i} className="space-y-1.5">
+                  <Skeleton className="h-4 w-3/4" />
+                  <Skeleton className="h-3 w-full" />
+                </div>
+              ))}
+            </div>
+          ) : recentChats.length === 0 ? (
             <div className="py-8 text-center">
               <p className="text-sm font-medium">No conversations yet</p>
               <p className="mt-1 text-xs text-muted-foreground">
@@ -211,15 +256,44 @@ function Dashboard() {
           )}
         </SectionCard>
         {quizChartData.length > 0 && (
-          <SectionCard title="Quiz performance" description="Score % over your attempts" className="lg:col-span-3">
+          <SectionCard
+            title="Quiz performance"
+            description="Score % over your attempts"
+            className="lg:col-span-3"
+          >
             <div className="h-56">
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={quizChartData}>
                   <CartesianGrid vertical={false} stroke="var(--border)" />
-                  <XAxis dataKey="attempt" tickLine={false} axisLine={false} fontSize={11} stroke="var(--muted-foreground)" />
-                  <YAxis domain={[0, 100]} tickLine={false} axisLine={false} fontSize={11} width={30} stroke="var(--muted-foreground)" />
-                  <Tooltip contentStyle={{ borderRadius: 8, border: "1px solid var(--border)", background: "var(--card)" }} />
-                  <Line type="monotone" dataKey="score" stroke="var(--chart-1)" strokeWidth={2.5} dot={{ r: 3 }} />
+                  <XAxis
+                    dataKey="attempt"
+                    tickLine={false}
+                    axisLine={false}
+                    fontSize={11}
+                    stroke="var(--muted-foreground)"
+                  />
+                  <YAxis
+                    domain={[0, 100]}
+                    tickLine={false}
+                    axisLine={false}
+                    fontSize={11}
+                    width={30}
+                    stroke="var(--muted-foreground)"
+                  />
+                  <Tooltip
+                    contentStyle={{
+                      borderRadius: 8,
+                      border: "1px solid var(--border)",
+                      background: "var(--card)",
+                    }}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="score"
+                    stroke="var(--chart-1)"
+                    strokeWidth={2.5}
+                    dot={{ r: 3 }}
+                  />
                 </LineChart>
               </ResponsiveContainer>
             </div>

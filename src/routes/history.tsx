@@ -1,19 +1,29 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import {
+  Area,
+  AreaChart,
+  CartesianGrid,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 import { FileText, MessageSquareText, NotebookPen, Trash2 } from "lucide-react";
 import { AppShell, SectionCard, StatusBadge } from "@/components/app-shell";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { apiRequest, useAuth } from "@/lib/firebase-client";
-import { fetchHistoryList, formatRelativeTime, useStudyDocuments, type ApiHistoryItem } from "@/lib/study-api";
+import { apiRequest } from "@/lib/firebase-client";
+import { formatRelativeTime, useStudyDocuments, useStudyHistory } from "@/lib/study-api";
 
 export const Route = createFileRoute("/history")({
   head: () => ({
     meta: [
       { title: "Study History — StudyMate AI" },
-      { name: "description", content: "Review past chats, notes, uploads, quiz attempts and progress." },
+      {
+        name: "description",
+        content: "Review past chats, notes, uploads, quiz attempts and progress.",
+      },
       { property: "og:title", content: "Study History — StudyMate AI" },
       { property: "og:description", content: "Track your study progress over time." },
     ],
@@ -47,30 +57,16 @@ function Row({
 }
 
 function History() {
-  const { user } = useAuth();
   const { docs } = useStudyDocuments();
-  const [items, setItems] = useState<ApiHistoryItem[]>([]);
-
-  const loadHistory = async () => {
-    if (!user) return;
-    try {
-      const list = await fetchHistoryList();
-      setItems(list);
-    } catch {
-      setItems([]);
-    }
-  };
-
-  useEffect(() => {
-    void loadHistory();
-  }, [user]);
+  const { items, removeHistoryItem } = useStudyHistory();
 
   const handleDelete = async (id: string) => {
+    const rollback = removeHistoryItem(id);
     try {
       await apiRequest(`/api/history/${id}`, { method: "DELETE" });
-      setItems((prev) => prev.filter((x) => x.id !== id));
       toast.success("History entry removed");
     } catch {
+      rollback();
       toast.error("Could not delete history entry");
     }
   };
@@ -79,12 +75,10 @@ function History() {
   const liveNotes = items.filter((i) => i.type === "note" || i.type === "explanation");
   const liveAttempts = items.filter((i) => i.type === "quiz_attempt");
 
-  const chartData = [...liveAttempts]
-    .reverse()
-    .map((a, idx) => ({
-      attempt: `Q${idx + 1}`,
-      score: a.percent ?? (a.total ? Math.round(((a.score ?? 0) / a.total) * 100) : 0),
-    }));
+  const chartData = [...liveAttempts].reverse().map((a, idx) => ({
+    attempt: `Q${idx + 1}`,
+    score: a.percent ?? (a.total ? Math.round(((a.score ?? 0) / a.total) * 100) : 0),
+  }));
 
   const stats = [
     [String(liveChats.length), "AI chats"],
@@ -104,7 +98,11 @@ function History() {
         ))}
       </div>
       {chartData.length > 0 && (
-        <SectionCard title="Quiz score progress" description="Performance across your attempts" className="mt-4">
+        <SectionCard
+          title="Quiz score progress"
+          description="Performance across your attempts"
+          className="mt-4"
+        >
           <div className="h-60">
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart data={chartData}>
@@ -115,10 +113,35 @@ function History() {
                   </linearGradient>
                 </defs>
                 <CartesianGrid vertical={false} stroke="var(--border)" />
-                <XAxis dataKey="attempt" tickLine={false} axisLine={false} fontSize={12} stroke="var(--muted-foreground)" />
-                <YAxis domain={[0, 100]} tickLine={false} axisLine={false} fontSize={12} width={30} stroke="var(--muted-foreground)" />
-                <Tooltip contentStyle={{ borderRadius: 8, border: "1px solid var(--border)", background: "var(--card)" }} />
-                <Area type="monotone" dataKey="score" stroke="var(--chart-1)" strokeWidth={2.5} fill="url(#g)" />
+                <XAxis
+                  dataKey="attempt"
+                  tickLine={false}
+                  axisLine={false}
+                  fontSize={12}
+                  stroke="var(--muted-foreground)"
+                />
+                <YAxis
+                  domain={[0, 100]}
+                  tickLine={false}
+                  axisLine={false}
+                  fontSize={12}
+                  width={30}
+                  stroke="var(--muted-foreground)"
+                />
+                <Tooltip
+                  contentStyle={{
+                    borderRadius: 8,
+                    border: "1px solid var(--border)",
+                    background: "var(--card)",
+                  }}
+                />
+                <Area
+                  type="monotone"
+                  dataKey="score"
+                  stroke="var(--chart-1)"
+                  strokeWidth={2.5}
+                  fill="url(#g)"
+                />
               </AreaChart>
             </ResponsiveContainer>
           </div>
@@ -135,7 +158,8 @@ function History() {
           {liveAttempts.length === 0 ? (
             <SectionCard>
               <p className="py-6 text-center text-sm text-muted-foreground">
-                No quiz attempts yet. Take a practice quiz from your uploaded PDFs to track your scores here.
+                No quiz attempts yet. Take a practice quiz from your uploaded PDFs to track your
+                scores here.
               </p>
             </SectionCard>
           ) : (
@@ -160,17 +184,25 @@ function History() {
                           <p className="font-medium">{a.title}</p>
                           <p className="text-xs text-muted-foreground">{a.documentTitle}</p>
                         </td>
-                        <td className="hidden px-4 py-3 capitalize sm:table-cell">{a.difficulty ?? "medium"}</td>
+                        <td className="hidden px-4 py-3 capitalize sm:table-cell">
+                          {a.difficulty ?? "medium"}
+                        </td>
                         <td className="px-4 py-3">
                           <span
                             className={`font-semibold ${
-                              pct >= 75 ? "text-success" : pct >= 60 ? "text-warning" : "text-destructive"
+                              pct >= 75
+                                ? "text-success"
+                                : pct >= 60
+                                  ? "text-warning"
+                                  : "text-destructive"
                             }`}
                           >
                             {score}/{total} ({pct}%)
                           </span>
                         </td>
-                        <td className="px-4 py-3 text-muted-foreground">{formatRelativeTime(a.createdAt)}</td>
+                        <td className="px-4 py-3 text-muted-foreground">
+                          {formatRelativeTime(a.createdAt)}
+                        </td>
                       </tr>
                     );
                   })}
@@ -182,7 +214,9 @@ function History() {
         <TabsContent value="chats">
           <SectionCard>
             {liveChats.length === 0 ? (
-              <p className="py-6 text-center text-sm text-muted-foreground">No AI Tutor conversations yet.</p>
+              <p className="py-6 text-center text-sm text-muted-foreground">
+                No AI Tutor conversations yet.
+              </p>
             ) : (
               <ul className="divide-y">
                 {liveChats.map((c) => (
@@ -192,7 +226,12 @@ function History() {
                     title={c.title}
                     meta={`${c.documentTitle} · ${formatRelativeTime(c.createdAt)}`}
                     right={
-                      <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => void handleDelete(c.id)}>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8"
+                        onClick={() => void handleDelete(c.id)}
+                      >
                         <Trash2 className="h-4 w-4" />
                       </Button>
                     }
@@ -205,7 +244,9 @@ function History() {
         <TabsContent value="notes">
           <SectionCard>
             {liveNotes.length === 0 ? (
-              <p className="py-6 text-center text-sm text-muted-foreground">No AI notes generated yet.</p>
+              <p className="py-6 text-center text-sm text-muted-foreground">
+                No AI notes generated yet.
+              </p>
             ) : (
               <ul className="divide-y">
                 {liveNotes.map((n) => (
@@ -215,7 +256,12 @@ function History() {
                     title={n.title}
                     meta={`${n.noteType ?? "Notes"} · ${formatRelativeTime(n.createdAt)}`}
                     right={
-                      <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => void handleDelete(n.id)}>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8"
+                        onClick={() => void handleDelete(n.id)}
+                      >
                         <Trash2 className="h-4 w-4" />
                       </Button>
                     }
@@ -228,7 +274,9 @@ function History() {
         <TabsContent value="docs">
           <SectionCard>
             {docs.length === 0 ? (
-              <p className="py-6 text-center text-sm text-muted-foreground">No PDF documents uploaded yet.</p>
+              <p className="py-6 text-center text-sm text-muted-foreground">
+                No PDF documents uploaded yet.
+              </p>
             ) : (
               <ul className="divide-y">
                 {docs.map((d) => (

@@ -1,16 +1,45 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useRef, useState } from "react";
 import { toast } from "sonner";
-import { FileText, Search, UploadCloud, LayoutGrid, List, Eye, Trash2, RotateCw, AlertCircle, FolderOpen } from "lucide-react";
+import {
+  FileText,
+  Search,
+  UploadCloud,
+  LayoutGrid,
+  List,
+  Eye,
+  Trash2,
+  RotateCw,
+  AlertCircle,
+  FolderOpen,
+} from "lucide-react";
 import { AppShell, DemoNote, EmptyState, StatusBadge } from "@/components/app-shell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "@/components/ui/sheet";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+  SheetDescription,
+} from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
-import { apiRequest } from "@/lib/firebase-client";
-import { useStudyDocuments, type ApiDocumentItem, type StudyDocView } from "@/lib/study-api";
+import { apiRequest, useAuth } from "@/lib/firebase-client";
+import {
+  useDocumentPages,
+  useStudyDocuments,
+  useStudyHistory,
+  type ApiDocumentSummary,
+  type StudyDocView,
+} from "@/lib/study-api";
 
 export const Route = createFileRoute("/library")({
   head: () => ({
@@ -25,7 +54,10 @@ export const Route = createFileRoute("/library")({
 });
 
 function LibraryPage() {
-  const { docs, refresh } = useStudyDocuments();
+  const { user } = useAuth();
+  const { docs, loading, upsertDocument, removeDocument } = useStudyDocuments();
+  const { prependHistoryItem } = useStudyHistory();
+  const { fetchDocumentPages, prefetchDocumentPages } = useDocumentPages();
   const [q, setQ] = useState("");
   const [status, setStatus] = useState("all");
   const [view, setView] = useState<"grid" | "list">("grid");
@@ -41,8 +73,8 @@ function LibraryPage() {
     setPreviewPages([]);
     setPreviewLoading(true);
     try {
-      const res = await apiRequest<{ document: ApiDocumentItem }>(`/api/documents/${doc.id}`);
-      setPreviewPages(res.document.pages ?? []);
+      const pages = await fetchDocumentPages(doc.id);
+      setPreviewPages(pages);
     } catch {
       setPreviewPages([]);
     } finally {
@@ -66,12 +98,26 @@ function LibraryPage() {
       void (async () => {
         try {
           setUploads((u) => u.map((x) => (x.name === f.name ? { ...x, progress: 65 } : x)));
-          const res = await apiRequest<{ document: ApiDocumentItem }>("/api/documents", {
+          const res = await apiRequest<{ document: ApiDocumentSummary }>("/api/documents", {
             method: "POST",
             body: fd,
           });
           setUploads((u) => u.map((x) => (x.name === f.name ? { ...x, progress: 100 } : x)));
-          await refresh();
+          upsertDocument(res.document);
+          prependHistoryItem({
+            id: `upload-${res.document.id}`,
+            uid: user?.uid ?? res.document.uid,
+            type: "document",
+            title: `Uploaded: ${res.document.title}`,
+            documentId: res.document.id,
+            documentTitle: res.document.title,
+            payload: {
+              subject: res.document.subject,
+              pageCount: res.document.pageCount,
+              sizeFormatted: res.document.sizeFormatted,
+            },
+            createdAt: res.document.createdAt,
+          });
           toast.success("PDF uploaded & indexed", {
             description: `${res.document.title} (${res.document.pageCount} pages ready for AI study).`,
           });
@@ -86,11 +132,14 @@ function LibraryPage() {
   };
 
   const handleDelete = async (doc: StudyDocView) => {
+    const rollback = removeDocument(doc.id);
     try {
       await apiRequest(`/api/documents/${doc.id}`, { method: "DELETE" });
-      await refresh();
-      toast.success("Document deleted", { description: `${doc.title} was removed from your library.` });
+      toast.success("Document deleted", {
+        description: `${doc.title} was removed from your library.`,
+      });
     } catch (err) {
+      rollback();
       toast.error("Could not delete document", {
         description: err instanceof Error ? err.message : "Please try again.",
       });
@@ -98,7 +147,8 @@ function LibraryPage() {
   };
 
   const filtered = docs.filter(
-    (d) => (status === "all" || d.status === status) && d.title.toLowerCase().includes(q.toLowerCase()),
+    (d) =>
+      (status === "all" || d.status === status) && d.title.toLowerCase().includes(q.toLowerCase()),
   );
 
   return (
@@ -106,7 +156,8 @@ function LibraryPage() {
       title="My Library"
       actions={
         <Button size="sm" onClick={() => fileRef.current?.click()}>
-          <UploadCloud className="mr-1.5 h-4 w-4" />Upload PDF
+          <UploadCloud className="mr-1.5 h-4 w-4" />
+          Upload PDF
         </Button>
       }
     >
@@ -137,8 +188,15 @@ function LibraryPage() {
           <UploadCloud className="h-6 w-6" />
         </span>
         <p className="mt-3 font-semibold">{drag ? "Drop to upload" : "Drag & drop PDFs here"}</p>
-        <p className="mt-1 text-sm text-muted-foreground">Textbooks, lecture slides or notes · up to 20 MB each</p>
-        <Button variant="outline" size="sm" className="mt-4" onClick={() => fileRef.current?.click()}>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Textbooks, lecture slides or notes · up to 20 MB each
+        </p>
+        <Button
+          variant="outline"
+          size="sm"
+          className="mt-4"
+          onClick={() => fileRef.current?.click()}
+        >
           Browse files
         </Button>
       </div>
@@ -160,7 +218,12 @@ function LibraryPage() {
       <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center">
         <div className="relative flex-1">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-          <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search your library" className="bg-card pl-9" />
+          <Input
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="Search your library"
+            className="bg-card pl-9"
+          />
         </div>
         <Select value={status} onValueChange={setStatus}>
           <SelectTrigger className="bg-card sm:w-44">
@@ -196,12 +259,31 @@ function LibraryPage() {
       </div>
 
       <div className="mt-4">
-        {filtered.length === 0 ? (
+        {loading && docs.length === 0 ? (
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            {Array.from({ length: 3 }).map((_, i) => (
+              <div key={i} className="flex flex-col rounded-xl border bg-card p-4 shadow-card">
+                <div className="flex items-start justify-between gap-2">
+                  <Skeleton className="h-10 w-10 rounded-lg" />
+                  <Skeleton className="h-5 w-14 rounded-full" />
+                </div>
+                <Skeleton className="mt-3 h-4 w-3/4" />
+                <Skeleton className="mt-2 h-3 w-1/2" />
+                <div className="mt-4 flex gap-2 border-t pt-3">
+                  <Skeleton className="h-8 flex-1 rounded-md" />
+                  <Skeleton className="h-8 w-8 rounded-md" />
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : filtered.length === 0 ? (
           <EmptyState
             icon={FolderOpen}
             title="No documents found"
             description={
-              q ? `Nothing matches "${q}". Try a different search or filter.` : "Upload your first PDF to start studying with AI."
+              q
+                ? `Nothing matches "${q}". Try a different search or filter.`
+                : "Upload your first PDF to start studying with AI."
             }
             action={
               <Button size="sm" onClick={() => fileRef.current?.click()}>
@@ -226,13 +308,20 @@ function LibraryPage() {
                 {d.status === "processing" && <Progress value={d.progress} className="mt-3 h-1" />}
                 {d.status === "failed" && (
                   <p className="mt-3 flex items-center gap-1.5 text-xs text-destructive">
-                    <AlertCircle className="h-3.5 w-3.5" />Couldn't read text from this scan.
+                    <AlertCircle className="h-3.5 w-3.5" />
+                    Couldn't read text from this scan.
                   </p>
                 )}
                 <div className="mt-4 flex gap-2 border-t pt-3">
                   {d.status === "failed" ? (
-                    <Button variant="outline" size="sm" className="flex-1" onClick={() => fileRef.current?.click()}>
-                      <RotateCw className="mr-1.5 h-3.5 w-3.5" />Re-upload
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="flex-1"
+                      onClick={() => fileRef.current?.click()}
+                    >
+                      <RotateCw className="mr-1.5 h-3.5 w-3.5" />
+                      Re-upload
                     </Button>
                   ) : (
                     <Button
@@ -240,9 +329,13 @@ function LibraryPage() {
                       size="sm"
                       className="flex-1"
                       disabled={d.status !== "ready"}
+                      onMouseEnter={() => {
+                        if (d.status === "ready") prefetchDocumentPages(d.id);
+                      }}
                       onClick={() => void openPreview(d)}
                     >
-                      <Eye className="mr-1.5 h-3.5 w-3.5" />Preview
+                      <Eye className="mr-1.5 h-3.5 w-3.5" />
+                      Preview
                     </Button>
                   )}
                   <Button
@@ -274,13 +367,25 @@ function LibraryPage() {
                 {filtered.map((d) => (
                   <tr key={d.id} className="hover:bg-muted/40">
                     <td className="max-w-[240px] truncate px-4 py-3 font-medium">{d.title}</td>
-                    <td className="hidden px-4 py-3 text-muted-foreground md:table-cell">{d.subject}</td>
-                    <td className="hidden px-4 py-3 text-muted-foreground sm:table-cell">{d.uploaded}</td>
+                    <td className="hidden px-4 py-3 text-muted-foreground md:table-cell">
+                      {d.subject}
+                    </td>
+                    <td className="hidden px-4 py-3 text-muted-foreground sm:table-cell">
+                      {d.uploaded}
+                    </td>
                     <td className="px-4 py-3">
                       <StatusBadge status={d.status} progress={d.progress} />
                     </td>
                     <td className="px-4 py-3 text-right">
-                      <Button variant="ghost" size="sm" disabled={d.status !== "ready"} onClick={() => void openPreview(d)}>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={d.status !== "ready"}
+                        onMouseEnter={() => {
+                          if (d.status === "ready") prefetchDocumentPages(d.id);
+                        }}
+                        onClick={() => void openPreview(d)}
+                      >
                         Preview
                       </Button>
                     </td>
@@ -315,7 +420,9 @@ function LibraryPage() {
                   <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-primary">
                     Page {p.pageNumber}
                   </p>
-                  <p className="whitespace-pre-line text-xs leading-relaxed text-foreground/90">{p.text}</p>
+                  <p className="whitespace-pre-line text-xs leading-relaxed text-foreground/90">
+                    {p.text}
+                  </p>
                 </div>
               ))}
             </div>
